@@ -1,0 +1,62 @@
+name: CI/CD Pipeline - Build, Push & GitOps
+
+on:
+  push:
+    branches:
+      - main # Kích hoạt workflow khi có push lên nhánh main
+  workflow_dispatch: # Cho phép chạy thủ công qua giao diện GitHub
+
+env:
+  # Tên image sẽ được đẩy lên Docker Registry (sử dụng Secret DOCKER_USERNAME)
+  IMAGE_NAME: ${{ secrets.DOCKER_USERNAME }}/k8s-blog-app
+  # Sử dụng toàn bộ mã SHA của commit làm tag image duy nhất
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  build-and-update-manifest:
+    runs-on: ubuntu-latest
+    steps:
+
+      # 1. Checkout Mã nguồn Ứng dụng
+      - name: 1. Checkout Mã nguồn Ứng dụng
+        uses: actions/checkout@v4
+
+      # 2. Đăng nhập vào Docker Registry (CI - Authentication)
+      - name: 2. Đăng nhập vào Docker Registry
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      # 3. Build & Push Docker Image (CI - Build & Push)
+      - name: 3. Build & Push Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+
+      # 4. Clone Repo Manifests và Cập nhật Image Tag (CD - GitOps)
+      - name: 4. Cập nhật Manifest (GitOps)
+        run: |
+          # Cấu hình Git cho tác vụ tự động
+          git config --global user.name "github-actions"
+          git config --global user.email "github-actions@github.com"
+          
+          # Clone Repo Manifests sử dụng PAT (GIT_OPS_TOKEN) để có quyền push
+          # GIT_OPS_REPO có giá trị ví dụ: github.com/danny2708/k8s-manifests
+          git clone https://${{ secrets.GIT_OPS_TOKEN }}@${{ secrets.GIT_OPS_REPO }} gitops-repo
+          cd gitops-repo
+
+          # Cập nhật image tag trong deployment.yaml bằng lệnh sed
+          # Thay thế toàn bộ dòng 'image: ...' bằng image tag mới
+          sed -i "s|image: .*|image: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}|g" deployment.yaml
+
+          # Commit và Push thay đổi lên GitOps Repo
+          git add deployment.yaml
+          if git commit -m "chore(deployment): Update image to ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"; then
+              git push
+              echo "Manifests updated and pushed to GitOps Repo."
+          else
+              echo "No changes detected in deployment.yaml. Skipping push."
+          fi
